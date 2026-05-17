@@ -38,7 +38,16 @@ def generate_launch_description():
                 '/stereo_inertial_node.launch.py']),
                 launch_arguments={'depth_aligned': 'false',
                                   'enableRviz': 'false',
-                                  'monoResolution': '400p'}.items(),
+                                  'monoResolution': '400p',
+                                  # Disable the spatial-detection (NN) branch.
+                                  # The jazzy branch of depthai_examples'
+                                  # stereo_inertial_node defaults nnName='x'
+                                  # and tries to load resources/x.blob at
+                                  # startup; missing -> driver aborts with
+                                  # "Send the path to the resouce folder
+                                  # containing NNBlob in 'resourceBaseFolder'".
+                                  # We don't need NN for SLAM.
+                                  'enableSpatialDetection': 'false'}.items(),
         ),
 
         # Sync right/depth/camera_info together

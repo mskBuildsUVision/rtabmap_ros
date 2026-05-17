@@ -1,0 +1,206 @@
+# syntax=docker/dockerfile:1.7
+#
+# rtabmap_ros + OAK-D (DepthAI) VIO SLAM image.
+#
+# Builds on top of introlab3it/rtabmap_ros:jazzy-latest and adds:
+#   - depthai-core (Luxonis C++ SDK)
+#   - luxonis/depthai-ros (depthai_bridge, depthai_examples, ...)
+#   - your local rtabmap_ros checkout as a colcon overlay
+#
+# Build (from the rtabmap_ros repo root, which is the build context):
+#   docker build -f Dockerfile.depthai -t rtabmap-depthai:jazzy .
+#
+# Run with OAK-D + X11:
+#   xhost +local:docker
+#   docker run -it --rm \
+#       --network host --privileged \
+#       -e DISPLAY=$DISPLAY \
+#       -v /tmp/.X11-unix:/tmp/.X11-unix \
+#       -v /dev/bus/usb:/dev/bus/usb \
+#       rtabmap-depthai:jazzy \
+#       ros2 launch rtabmap_examples depthai.launch.py camera_model:=OAK-D
+
+FROM introlab3it/rtabmap_ros:jazzy-latest
+
+# The base image's setup.bash does NOT export ROS_DISTRO, which trips up some
+# generators (rosidl_generator_rs) and rosdep. Set it explicitly.
+ENV ROS_DISTRO=jazzy \
+    DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# ---------------------------------------------------------------------------
+# System dependencies: build tools, mold linker, DepthAI native deps, and the
+# ROS packages the OAK-D launch files need at runtime (imu_filter_madgwick).
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake build-essential pkg-config ca-certificates mold \
+        libusb-1.0-0-dev libopencv-dev \
+        python3-colcon-common-extensions python3-rosdep python3-vcstool \
+        ros-${ROS_DISTRO}-imu-filter-madgwick \
+        ros-${ROS_DISTRO}-cv-bridge \
+        ros-${ROS_DISTRO}-image-transport \
+        ros-${ROS_DISTRO}-image-transport-plugins \
+        ros-${ROS_DISTRO}-camera-info-manager \
+        ros-${ROS_DISTRO}-vision-msgs \
+        ros-${ROS_DISTRO}-image-pipeline \
+        ros-${ROS_DISTRO}-robot-state-publisher \
+        ros-${ROS_DISTRO}-xacro \
+    && rm -rf /var/lib/apt/lists/*
+
+# The base image has ros-jazzy-sdformat-urdf (a pluginlib plugin that lets
+# robot_state_publisher parse SDF/Gazebo URDFs), but it's missing its native
+# dependency libsdformat14.so.14 (only published in the OSRF Gazebo apt repo,
+# not in Ubuntu noble). At startup robot_state_publisher enumerates all URDF
+# plugins, tries to dlopen this one, fails, and aborts the whole process with
+# SIGABRT -- killing oak_state_publisher and breaking the OAK TF tree. We
+# don't need SDF parsing (depthai_descriptions ships plain URDF/Xacro), so
+# remove the broken plugin entirely.
+RUN apt-get update && apt-get remove -y --purge \
+        ros-${ROS_DISTRO}-sdformat-urdf 2>/dev/null || true && \
+    rm -rf /var/lib/apt/lists/*
+
+# Remove the Rust IDL generator: not used by rtabmap / depthai-ros and it
+# crashes in this image because of how its env is set up.
+RUN apt-get update && apt-get remove -y ros-${ROS_DISTRO}-rosidl-generator-rs || true && \
+    rm -rf /var/lib/apt/lists/*
+
+# The base image ships TWO rtabmap C++ libraries side-by-side:
+#   /usr/local/lib/rtabmap-0.23/                            (built from source by introlab3it)
+#   /opt/ros/jazzy/lib/x86_64-linux-gnu/rtabmap-0.22/       (apt package ros-jazzy-rtabmap)
+# Our local rtabmap_ros sources target the 0.23 API (e.g. Memory::isReadOnly,
+# Memory::getLastWorkingSignature(bool)). When find_package(rtabmap) happens
+# to resolve to 0.22 first, the build fails with "no member named isReadOnly"
+# and "candidate expects 0 arguments, 1 provided". Force-remove the apt 0.22
+# package so only 0.23 under /usr/local remains.
+RUN dpkg -P --force-depends ros-${ROS_DISTRO}-rtabmap ros-${ROS_DISTRO}-rtabmap-ros 2>/dev/null || true && \
+    rm -rf /opt/ros/${ROS_DISTRO}/lib/x86_64-linux-gnu/rtabmap-0.22 \
+           /opt/ros/${ROS_DISTRO}/include/rtabmap-0.22 \
+           /opt/ros/${ROS_DISTRO}/share/rtabmap-0.22 \
+           /opt/ros/${ROS_DISTRO}/lib/x86_64-linux-gnu/cmake/rtabmap-0.22 && \
+    ldconfig
+
+# ---------------------------------------------------------------------------
+# Build & install depthai-core (Luxonis C++ SDK).
+#
+# IMPORTANT: depthai-core 3.x (the current `main`) removed the
+# `depthai-shared/` headers and renamed types like `dai::RawImgFrame`, which
+# the `humble` branch of depthai-ros still uses. Pin to the latest 2.x release
+# (v2.30.0) so the API matches depthai-ros@humble.
+# Parallelism is capped at 2 to keep memory pressure low.
+# ---------------------------------------------------------------------------
+ARG DEPTHAI_CORE_TAG=v2.30.0
+RUN git clone --recursive --depth 1 --branch ${DEPTHAI_CORE_TAG} \
+        https://github.com/luxonis/depthai-core.git /opt/depthai-core && \
+    cmake -S /opt/depthai-core -B /opt/depthai-core/build \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D BUILD_SHARED_LIBS=ON && \
+    cmake --build /opt/depthai-core/build -j 2 && \
+    cmake --install /opt/depthai-core/build && \
+    ldconfig && \
+    rm -rf /opt/depthai-core/build
+
+# ---------------------------------------------------------------------------
+# Overlay workspace: clone depthai-ros and copy local rtabmap_ros into it so
+# the local sources shadow the apt-installed rtabmap_ros from the base image.
+# ---------------------------------------------------------------------------
+ARG DEPTHAI_ROS_BRANCH=jazzy
+WORKDIR /root/ros2_ws
+RUN mkdir -p src && \
+    git clone --depth 1 --branch ${DEPTHAI_ROS_BRANCH} \
+        https://github.com/luxonis/depthai-ros.git src/depthai-ros
+
+# Copy the host's rtabmap_ros checkout into the overlay so the local sources
+# shadow the apt-installed rtabmap_ros from the base image. This must be a
+# COPY (not commented out!) -- otherwise the overlay workspace contains only
+# depthai-ros, and `ros2 run rtabmap_examples ...` reports "No executable
+# found" because none of the local rtabmap packages get installed.
+COPY . /root/ros2_ws/src/rtabmap_ros
+
+WORKDIR /root/ros2_ws
+
+# Resolve any remaining ROS deps via rosdep.
+#
+# Skip keys we provide ourselves rather than via apt:
+#   - depthai*  -> we built depthai-core from source under /usr/local
+#   - rtabmap   -> the base image already provides 0.23 under /usr/local.
+#                  rtabmap_conversions/package.xml has `<depend>rtabmap</depend>`,
+#                  which would otherwise make rosdep apt-install
+#                  `ros-jazzy-rtabmap` (== 0.22), reintroducing the
+#                  /opt/ros/jazzy/.../rtabmap-0.22/ headers we purged earlier
+#                  and breaking rtabmap_slam ("no member named isReadOnly",
+#                  "candidate expects 0 arguments, 1 provided").
+RUN apt-get update && \
+    (rosdep init 2>/dev/null || true) && rosdep update && \
+    rosdep install --from-paths src --ignore-src -r -y \
+        --rosdistro ${ROS_DISTRO} \
+        --skip-keys "rtabmap depthai depthai_bridge depthai_ros_driver depthai_examples depthai_filters depthai_descriptions depthai_ros_msgs" && \
+    rm -rf /var/lib/apt/lists/*
+
+# Defensive re-purge: even with the skip-keys above, anything pulled in
+# transitively by rosdep can still drag ros-jazzy-rtabmap back in. Kill the
+# 0.22 install one more time, immediately before colcon build, so
+# find_package(rtabmap) cannot resolve to it.
+RUN dpkg -P --force-depends ros-${ROS_DISTRO}-rtabmap ros-${ROS_DISTRO}-rtabmap-ros 2>/dev/null || true && \
+    rm -rf /opt/ros/${ROS_DISTRO}/lib/x86_64-linux-gnu/rtabmap-0.22 \
+           /opt/ros/${ROS_DISTRO}/include/rtabmap-0.22 \
+           /opt/ros/${ROS_DISTRO}/share/rtabmap-0.22 \
+           /opt/ros/${ROS_DISTRO}/lib/x86_64-linux-gnu/cmake/rtabmap-0.22 && \
+    ldconfig
+
+
+# ---------------------------------------------------------------------------
+# Colcon build with conservative parallelism so the build doesn't OOM the host.
+# Uses the mold linker to keep peak link-time RAM low. Bump these values once
+# you've confirmed the build fits in memory on your machine.
+#
+# MAKEFLAGS limits per-package compile parallelism for Make-based builds and
+# CMAKE_BUILD_PARALLEL_LEVEL does the same for `cmake --build` (Ninja, etc.).
+# Both are env vars, not CMake cache variables, so do NOT pass them via
+# --cmake-args -D... (CMake warns "Manually-specified variables were not used").
+# ---------------------------------------------------------------------------
+ENV MAKEFLAGS="-j2" \
+    CMAKE_BUILD_PARALLEL_LEVEL=2
+RUN bash -c "set -e && \
+    source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    colcon build --symlink-install \
+        --executor sequential \
+        --parallel-workers 1 \
+        --cmake-args \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS='-fuse-ld=mold' \
+            -DCMAKE_SHARED_LINKER_FLAGS='-fuse-ld=mold' \
+            -DCMAKE_MODULE_LINKER_FLAGS='-fuse-ld=mold'"
+
+# ---------------------------------------------------------------------------
+# Auto-source ROS and the overlay in every interactive shell.
+# ---------------------------------------------------------------------------
+RUN { \
+        echo "export ROS_DISTRO=${ROS_DISTRO}"; \
+        echo "source /opt/ros/${ROS_DISTRO}/setup.bash"; \
+        echo "[ -f /root/ros2_ws/install/setup.bash ] && source /root/ros2_ws/install/setup.bash"; \
+    } >> /root/.bashrc
+
+# ---------------------------------------------------------------------------
+# Custom entrypoint. The base image's /ros_entrypoint.sh only sources the
+# underlay (/opt/ros/jazzy/setup.bash). When you do
+#   `docker run ... <image> ros2 launch rtabmap_examples depthai.launch.py ...`
+# the command is exec'd directly (not via an interactive shell), so ~/.bashrc
+# is never read and our colcon overlay never gets sourced -- which is why
+# `ros2 launch` complains "package 'depthai_examples' not found, searching:
+# ['/opt/ros/jazzy']". Wrap the base entrypoint so the overlay is always on
+# the path for both `docker run <image> <cmd>` and `docker exec` use cases.
+# ---------------------------------------------------------------------------
+RUN { \
+        echo '#!/bin/bash'; \
+        echo 'set -e'; \
+        echo "export ROS_DISTRO=${ROS_DISTRO}"; \
+        echo "source /opt/ros/${ROS_DISTRO}/setup.bash"; \
+        echo '[ -f /root/ros2_ws/install/setup.bash ] && source /root/ros2_ws/install/setup.bash'; \
+        echo 'exec "$@"'; \
+    } > /ros_entrypoint.sh && chmod +x /ros_entrypoint.sh
+
+ENTRYPOINT ["/ros_entrypoint.sh"]
+WORKDIR /root/ros2_ws
+CMD ["bash"]
