@@ -10,7 +10,7 @@
 # Build (from the rtabmap_ros repo root, which is the build context):
 #   docker build -f Dockerfile.depthai -t rtabmap-depthai:jazzy .
 #
-# Run with OAK-D + X11:
+# Run with OAK-FFC-3P + X11:
 #   xhost +local:docker
 #   docker run -it --rm \
 #       --network host --privileged \
@@ -18,7 +18,7 @@
 #       -v /tmp/.X11-unix:/tmp/.X11-unix \
 #       -v /dev/bus/usb:/dev/bus/usb \
 #       rtabmap-depthai:jazzy \
-#       ros2 launch rtabmap_examples depthai.launch.py camera_model:=OAK-D
+#       ros2 launch rtabmap_examples depthai_ffc.launch.py
 
 FROM introlab3it/rtabmap_ros:jazzy-latest
 
@@ -200,6 +200,15 @@ RUN { \
         echo '[ -f /root/ros2_ws/install/setup.bash ] && source /root/ros2_ws/install/setup.bash'; \
         echo 'exec "$@"'; \
     } > /ros_entrypoint.sh && chmod +x /ros_entrypoint.sh
+
+# ---------------------------------------------------------------------------
+# Bake in OAK-FFC-3P config and startup script
+# ---------------------------------------------------------------------------
+RUN mkdir -p /config
+COPY docker/depthai/oak_ffc_stereo.yaml /config/oak_ffc_stereo.yaml
+COPY docker/depthai/pub_camera_info.py /config/pub_camera_info.py
+COPY docker/depthai/start_slam.sh /config/start_slam.sh
+RUN chmod +x /config/start_slam.sh
 
 ENTRYPOINT ["/ros_entrypoint.sh"]
 WORKDIR /root/ros2_ws

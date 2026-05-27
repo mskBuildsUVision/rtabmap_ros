@@ -58,6 +58,20 @@ RTAB-Map's ROS2 package (branch `ros2`). **ROS2 Humble minimum required**: curre
 
 * For robot integration examples (turtlebot3 and turtlebot4, nav2 integration), see [rtabmap_demos](https://github.com/introlab/rtabmap_ros/tree/ros2/rtabmap_demos) sub-folder.
 
+## DepthAI OAK-FFC-3P Docker
+Build and run the `Dockerfile.depthai` image:
+```bash
+docker build -f Dockerfile.depthai -t rtabmap-depthai:jazzy .
+
+docker run -it --rm --name rtabmap_oak \
+  --network host --privileged \
+  -e DISPLAY=$DISPLAY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v /dev/bus/usb:/dev/bus/usb \
+  rtabmap-depthai:jazzy \
+  /config/start_slam.sh
+```
+
 ## Logging
 To make RTAB-Map's logs appear ordered with RCLCPP's logs, set the following environment variables in your `.bashrc` (see official "[About Logging](https://docs.ros.org/en/humble/Concepts/Intermediate/About-Logging.html)" documentation for more info):
 ```bash

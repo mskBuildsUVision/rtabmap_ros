@@ -13,4 +13,5 @@ log
 *.pyc
 __pycache__
 docker
+!docker/depthai/**
 Dockerfile*

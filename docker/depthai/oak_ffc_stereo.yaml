@@ -1,0 +1,12 @@
+/oak:
+  ros__parameters:
+    camera:
+      i_nn_type: none
+      i_pipeline_type: STEREO
+    left:
+      i_board_socket_id: 1
+    right:
+      i_board_socket_id: 2
+    stereo:
+      i_input_width: 768
+      i_input_height: 480
