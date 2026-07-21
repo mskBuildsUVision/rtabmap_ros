@@ -59,9 +59,17 @@ RTAB-Map's ROS2 package (branch `ros2`). **ROS2 Humble minimum required**: curre
 * For robot integration examples (turtlebot3 and turtlebot4, nav2 integration), see [rtabmap_demos](https://github.com/introlab/rtabmap_ros/tree/ros2/rtabmap_demos) sub-folder.
 
 ## DepthAI OAK-FFC-3P Docker
-Build and run the `Dockerfile.depthai` image:
+
+Stereo SLAM for the Luxonis **OAK-FFC-3P** (not OAK-D). See [docker/depthai/README.md](docker/depthai/README.md) for full documentation, debugging notes, and bring-up history.
+
+**Build:**
 ```bash
 docker build -f Dockerfile.depthai -t rtabmap-depthai:jazzy .
+```
+
+**Run full SLAM** (driver + camera_info + RTAB-Map + rtabmap_viz):
+```bash
+xhost +local:docker
 
 docker run -it --rm --name rtabmap_oak \
   --network host --privileged \
@@ -70,6 +78,18 @@ docker run -it --rm --name rtabmap_oak \
   -v /dev/bus/usb:/dev/bus/usb \
   rtabmap-depthai:jazzy \
   /config/start_slam.sh
+```
+
+**Run via launch file** (with approximate sync for left/right timestamp skew):
+```bash
+docker run -it --rm --name rtabmap_oak \
+  --network host --privileged \
+  -e DISPLAY=$DISPLAY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v /dev/bus/usb:/dev/bus/usb \
+  rtabmap-depthai:jazzy \
+  ros2 launch rtabmap_examples depthai_ffc.launch.py \
+    approx_sync:=true approx_sync_max_interval:=0.05
 ```
 
 ## Logging
